@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
+	rpctypes "github.com/okex/okexchain/app/rpc/types"
 
 	"github.com/tendermint/tendermint/libs/log"
 	coretypes "github.com/tendermint/tendermint/rpc/core/types"
@@ -17,7 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	rpcfilters "github.com/okex/okexchain/app/rpc/namespaces/eth/filters"
-	rpctypes "github.com/okex/okexchain/app/rpc/types"
 	evmtypes "github.com/okex/okexchain/x/evm/types"
 )
 
@@ -100,37 +100,39 @@ func (api *PubSubAPI) subscribeNewHeads(conn *websocket.Conn) (rpc.ID, error) {
 		for {
 			select {
 			case event := <-headersCh:
-				data, _ := event.Data.(tmtypes.EventDataNewBlockHeader)
-				headerWithBlockHash, err := rpctypes.EthHeaderWithBlockHashFromTendermint(&data.Header)
-				if err != nil {
-					api.logger.Error("failed to get header with block hash", "error", err)
-					continue
-				}
-
-				api.filtersMu.Lock()
-				if f, found := api.filters[sub.ID()]; found {
-					// write to ws conn
-					res := &SubscriptionNotification{
-						Jsonrpc: "2.0",
-						Method:  "eth_subscription",
-						Params: &SubscriptionResult{
-							Subscription: sub.ID(),
-							Result:       headerWithBlockHash,
-						},
-					}
-
-					err = f.conn.WriteJSON(res)
+				go func(event coretypes.ResultEvent) {
+					data, _ := event.Data.(tmtypes.EventDataNewBlockHeader)
+					headerWithBlockHash, err := rpctypes.EthHeaderWithBlockHashFromTendermint(&data.Header)
 					if err != nil {
-						api.logger.Error("failed to write header", "ID", sub.ID(), "error", err)
-					} else {
-						api.logger.Debug("successfully write header", "ID", sub.ID(), "blocknumber", headerWithBlockHash.Number)
+						api.logger.Error("failed to get header with block hash", "error", err)
+						return
 					}
-				}
-				api.filtersMu.Unlock()
 
-				if err == websocket.ErrCloseSent {
-					api.unsubscribe(sub.ID())
-				}
+					api.filtersMu.Lock()
+					if f, found := api.filters[sub.ID()]; found {
+						// write to ws conn
+						res := &SubscriptionNotification{
+							Jsonrpc: "2.0",
+							Method:  "eth_subscription",
+							Params: &SubscriptionResult{
+								Subscription: sub.ID(),
+								Result:       headerWithBlockHash,
+							},
+						}
+
+						err = f.conn.WriteJSON(res)
+						if err != nil {
+							api.logger.Error("failed to write header", "ID", sub.ID(), "error", err)
+						} else {
+							api.logger.Debug("successfully write header", "ID", sub.ID(), "blocknumber", headerWithBlockHash.Number)
+						}
+					}
+					api.filtersMu.Unlock()
+
+					if err == websocket.ErrCloseSent {
+						api.unsubscribe(sub.ID())
+					}
+				}(event)
 			case err := <-errCh:
 				api.filtersMu.Lock()
 				sub.Unsubscribe(api.events)
